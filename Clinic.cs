@@ -14,25 +14,18 @@ namespace EnhancedAmbulanceAI
 {
     public class Clinic
     {
-        private Settings _settings;
         private Helper _helper;
-
-        private string _truckCount;
 
         private readonly ushort _id;
 
-        private Dictionary<ushort, DateTime> _master;
+        private Dictionary<ushort, float> _master;
         private HashSet<ushort> _primary;
         private HashSet<ushort> _secondary;
         private List<ushort> _checkups;
 
-        public Clinic(ushort id, ref Dictionary<ushort, DateTime> master)
+        public Clinic(ushort id, ref Dictionary<ushort, float> master)
         {
-            _settings = Settings.Instance;
             _helper = Helper.Instance;
-
-            _truckCount = ColossalFramework.Globalization.Locale.Get("AIINFO_AMBULANCES");
-            _truckCount = _truckCount.Substring(0, _truckCount.IndexOf(":") + 1);
 
             _id = id;
 
@@ -45,7 +38,7 @@ namespace EnhancedAmbulanceAI
         public void AddPickup(ushort id)
         {
             if (!_master.ContainsKey(id))
-                _master.Add(id, SimulationManager.instance.m_currentGameTime.AddDays((_settings.DispatchGap + 1) * -1));
+                _master.Add(id, float.PositiveInfinity);
 
             if (_primary.Contains(id) || _secondary.Contains(id))
                 return;
@@ -99,83 +92,6 @@ namespace EnhancedAmbulanceAI
             return distance <= range;
         }
 
-        public void DispatchIdleVehicle()
-        {
-            if (SimulationManager.instance.SimulationPaused) return;
-
-            Building[] buildings = Singleton<BuildingManager>.instance.m_buildings.m_buffer;
-            Building me = buildings[_id];
-
-            if ((me.m_flags & Building.Flags.Active) == Building.Flags.None && me.m_productionRate == 0) return;
-
-            if ((me.m_flags & Building.Flags.Downgrading) != Building.Flags.None) return;
-
-            if (me.Info.m_buildingAI.IsFull(_id, ref buildings[_id])) return;
-
-            string stats = me.Info.m_buildingAI.GetLocalizedStats(_id, ref buildings[_id]);
-            stats = stats.Substring(stats.IndexOf(_truckCount));
-
-            int now;
-            int max;
-
-            Match match = Regex.Match(stats, @"[0-9]+");
-
-            if (match.Success)
-                now = int.Parse(match.Value);
-            else
-                return;
-
-            match = match.NextMatch();
-
-            if (match.Success)
-                max = int.Parse(match.Value);
-            else
-                return;
-
-            if (now >= max)
-                return;
-
-            ushort target = 0;
-
-            target = GetUnclaimedTarget(_primary);
-
-            if (target == 0)
-                target = GetUnclaimedTarget(_secondary);
-            
-            if (target == 0)
-                return;
-
-            TransferManager.TransferOffer offer = default(TransferManager.TransferOffer);
-            offer.Building = target;
-            offer.Position = buildings[target].m_position;
-
-            me.Info.m_buildingAI.StartTransfer(
-                _id,
-                ref buildings[_id],
-                TransferManager.TransferReason.Sick,
-                offer
-            );
-
-            _master[target] = SimulationManager.instance.m_currentGameTime;
-        }
-
-        private ushort GetUnclaimedTarget(ICollection<ushort> targets)
-        {
-            ushort target = 0;
-            DateTime lastDispatch = SimulationManager.instance.m_currentGameTime;
-
-            foreach (ushort i in targets)
-            {
-                if (_master.ContainsKey(i) && _master[i] < lastDispatch && (SimulationManager.instance.m_currentGameTime - _master[i]).TotalDays > _settings.DispatchGap)
-                {
-                    target = i;
-                    lastDispatch = _master[i];
-                }
-            }
-
-            return target;
-        }
-
         public ushort AssignTarget(Vehicle truck)
         {
             Building[] buildings = Singleton<BuildingManager>.instance.m_buildings.m_buffer;
@@ -193,7 +109,7 @@ namespace EnhancedAmbulanceAI
 
             if (target == 0)
             {
-                if ((current != 0 && !SkylinesOverwatch.Data.Instance.IsBuildingWithGarbage(current) && WithinPrimaryRange(current)) || _checkups.Count == 0)
+                if ((current != 0 && !SkylinesOverwatch.Data.Instance.IsBuildingWithSick(current) && WithinPrimaryRange(current)) || _checkups.Count == 0)
                     target = current;
                 else
                 {
@@ -206,11 +122,13 @@ namespace EnhancedAmbulanceAI
                 if (target != current)
                 {
                     if (_master.ContainsKey(current))
-                        _master[current] = SimulationManager.instance.m_currentGameTime.AddDays((_settings.DispatchGap + 1) * -1);
+                        _master[current] = float.PositiveInfinity;
                 }
 
+                float distance = (truck.GetLastFramePosition() - buildings[target].m_position).sqrMagnitude;
+
                 if (_master.ContainsKey(target))
-                    _master[target] = SimulationManager.instance.m_currentGameTime;
+                    _master[target] = distance;
             }
 
             return target;
@@ -241,7 +159,7 @@ namespace EnhancedAmbulanceAI
                 }
                 else
                 {
-                    targetProblematic = (buildings[target].m_problems & Notification.Problem.Noise) != Notification.Problem.None;
+                    targetProblematic = (buildings[target].m_problems & (Notification.Problem.Noise | Notification.Problem.DirtyWater | Notification.Problem.Pollution)) != Notification.Problem.None;
 
                     Vector3 a = buildings[target].m_position;
 
@@ -266,11 +184,11 @@ namespace EnhancedAmbulanceAI
                 Vector3 p = buildings[id].m_position;
                 float d = (p - position).sqrMagnitude;
 
-                bool candidateProblematic = (buildings[id].m_problems & Notification.Problem.Noise) != Notification.Problem.None;
+                bool candidateProblematic = (buildings[id].m_problems & (Notification.Problem.Noise | Notification.Problem.DirtyWater | Notification.Problem.Pollution)) != Notification.Problem.None;
 
-                if ((SimulationManager.instance.m_currentGameTime - _master[id]).TotalDays <= _settings.DispatchGap)
+                if (!float.IsPositiveInfinity(_master[id]))
                 {
-                    if (d > 2500)
+                    if (d > 2500 || d > _master[id])
                         continue;
 
                     if (d > distance)

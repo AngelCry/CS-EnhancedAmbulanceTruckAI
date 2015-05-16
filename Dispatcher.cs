@@ -23,16 +23,12 @@ namespace EnhancedAmbulanceAI
         private bool _terminated;
 
         private Dictionary<ushort, Clinic> _clinics;
-        private Dictionary<ushort, DateTime> _master;
+        private Dictionary<ushort, float> _master;
+        private HashSet<ushort> _stopped;
 
         protected bool IsOverwatched()
         {
             #if DEBUG
-
-            foreach (var plugin in PluginManager.instance.GetPluginsInfo())
-            {
-                _helper.NotifyPlayer("Plugin: "+plugin.name+" ID: "+plugin.publishedFileID);
-            }
 
             return true;
 
@@ -97,7 +93,8 @@ namespace EnhancedAmbulanceAI
                     SkylinesOverwatch.Settings.Instance.Enable.VehicleMonitor = true;
 
                     _clinics = new Dictionary<ushort, Clinic>();
-                    _master = new Dictionary<ushort, DateTime>();
+                    _master = new Dictionary<ushort, float>();
+                    _stopped = new HashSet<ushort>();
 
                     _initialized = true;
 
@@ -114,7 +111,6 @@ namespace EnhancedAmbulanceAI
 
                     ProcessNewPickups();
 
-                    ProcessIdleAmbulanceTrucks();
                     UpdateAmbulanceTrucks();
                 }
             }
@@ -149,10 +145,21 @@ namespace EnhancedAmbulanceAI
             SkylinesOverwatch.Data data = SkylinesOverwatch.Data.Instance;
 
             foreach (ushort id in data.Hospitals)
+            {
                 _clinics.Add(id, new Clinic(id, ref _master));
+#if DEBUG
+                _helper.NotifyPlayer("adding "+id+" to clinics list");
+#endif
+            }
 
             foreach (ushort pickup in data.BuildingsWithSick)
             {
+#if DEBUG
+                Building[] buildings = Singleton<BuildingManager>.instance.m_buildings.m_buffer;
+                string locname = buildings[pickup].Info.m_buildingAI.GenerateName(pickup, buildings[pickup].Info.m_instanceID);
+                string msg = string.Format("adding {0} (id: {1}) to pickup list", locname, pickup);
+                _helper.NotifyPlayer(msg);
+#endif
                 foreach (ushort id in _clinics.Keys)
                     _clinics[id].AddPickup(pickup);
             }
@@ -174,7 +181,7 @@ namespace EnhancedAmbulanceAI
 
                 _clinics.Add(x, new Clinic(x, ref _master));
 
-                foreach (ushort pickup in data.BuildingsWithGarbage)
+                foreach (ushort pickup in data.BuildingsWithSick)
                     _clinics[x].AddPickup(pickup);
             }
         }
@@ -195,35 +202,40 @@ namespace EnhancedAmbulanceAI
             {
                 if (data.IsBuildingWithSick(pickup))
                 {
+                    if (_master.ContainsKey(pickup))
+                    {
+                        if (float.IsNegativeInfinity(_master[pickup]))
+                            _master[pickup] = float.PositiveInfinity;
+                        else if (_master[pickup] <= 400)
+                            _master[pickup] = float.NegativeInfinity;
+                    }
                     foreach (ushort id in _clinics.Keys)
+                    {
                         _clinics[id].AddPickup(pickup);
+#if DEBUG
+                        Building[] buildings = Singleton<BuildingManager>.instance.m_buildings.m_buffer;
+                        string locname = buildings[pickup].Info.m_buildingAI.GenerateName(pickup, buildings[pickup].Info.m_instanceID);
+                        string msg = string.Format("adding {0} (id: {1}) to pickup list", locname, pickup);
+                        _helper.NotifyPlayer(msg);
+#endif
+                    }
                 }
                 else
                 {
-                    foreach (ushort id in _clinics.Keys)
-                        _clinics[id].AddCheckup(pickup);
+                    if (data.IsCommercialBuilding(pickup) || data.IsIndustrialBuilding(pickup) || data.IsOfficeBuilding(pickup) || data.IsResidentialBuilding(pickup))
+                    {
+                        foreach (ushort id in _clinics.Keys)
+                        {
+                            _clinics[id].AddCheckup(pickup);
+#if DEBUG
+//                            Building[] buildings = Singleton<BuildingManager>.instance.m_buildings.m_buffer;
+//                            string locname = buildings[pickup].Info.m_buildingAI.GenerateName(pickup, buildings[pickup].Info.m_instanceID);
+//                            string msg = string.Format("adding {0} (id: {1}) to checkup list", locname, pickup);
+//                            _helper.NotifyPlayer(msg);
+#endif
+                        }
+                    }
                 }
-            }
-        }
-
-        private void ProcessIdleAmbulanceTrucks()
-        {
-            SkylinesOverwatch.Data data = SkylinesOverwatch.Data.Instance;
-
-            foreach (ushort x in data.BuildingsUpdated)
-            {
-                if (!data.IsHospital(x))
-                    continue;
-
-                if (!_clinics.ContainsKey(x))
-                    continue;
-                #if DEBUG
-
-                _helper.NotifyPlayer("[ARIS] send ambulance to target...");
-
-                #endif
-
-                _clinics[x].DispatchIdleVehicle();
             }
         }
 
@@ -240,6 +252,19 @@ namespace EnhancedAmbulanceAI
 
                 Vehicle v = vehicles[id];
 
+                if ((v.m_flags & Vehicle.Flags.Stopped) != Vehicle.Flags.None)
+                {
+                    if (!_stopped.Contains(id))
+                    {
+                        Singleton<VehicleManager>.instance.RemoveFromGrid(id, ref vehicles[id], false);
+                        _stopped.Add(id);
+                    }
+
+                    continue;
+                }
+                else
+                    _stopped.Remove(id);
+
                 if (!_clinics.ContainsKey(v.m_sourceBuilding))
                     continue;
 
@@ -249,7 +274,15 @@ namespace EnhancedAmbulanceAI
                 ushort target = _clinics[v.m_sourceBuilding].AssignTarget(v);
 
                 if (target != 0 && target != v.m_targetBuilding)
+                {
                     v.Info.m_vehicleAI.SetTarget(id, ref vehicles[id], target);
+#if DEBUG
+                    Building[] buildings = Singleton<BuildingManager>.instance.m_buildings.m_buffer;
+                    string locname = buildings[target].Info.m_buildingAI.GenerateName(target, buildings[target].Info.m_instanceID);
+                    string msg = string.Format("set {0} (id: {1}) as target for ambulance", locname, target);
+                    _helper.NotifyPlayer(msg);
+#endif
+                }
             }
         }
     }
